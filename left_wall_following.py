@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+
+import rospy
+import sys
+import numpy as np
+import tf2_ros
+import tf2_geometry_msgs
+from geometry_msgs.msg import Twist, PointStamped
+from sensor_msgs.msg import LaserScan
+
+
+class turtlebot_behavior:
+    def __init__(self):
+        # Publisher: sends velocity commands to move the robot
+        self.pub = rospy.Publisher('/cmd_vel', Twist, queue_size=10)
+
+        # Subscriber: receives LiDAR scan data
+        self.sub = rospy.Subscriber('/scan', LaserScan, self.callback)
+
+        # TF2: lets us look up coordinate frame transforms
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
+
+        # State machine starts in 'forward'
+        self.state = 'forward'
+        self.front_blocked = False
+        self.rate = rospy.Rate(10)
+
+        while not rospy.is_shutdown():
+            # Try to get the transform from base_scan to left_limit
+            try:
+                self.transform = self.tf_buffer.lookup_transform(
+                    'left_limit', 'base_scan',
+                    rospy.Time(0), rospy.Duration(1.0)
+                )
+            except:
+                self.rate.sleep()
+                continue
+
+            # Build velocity command based on current state
+            cmd = Twist()
+
+            if self.front_blocked:
+                # Something right in front: stop and turn right
+                cmd.linear.x = 0.0
+                cmd.angular.z = -0.5
+            elif self.state == 'forward':
+                cmd.linear.x = 0.15
+                cmd.angular.z = 0.0
+            elif self.state == 'right':
+                # Too close to left wall: steer away
+                cmd.linear.x = 0.15
+                cmd.angular.z = -0.30
+            elif self.state == 'left':
+                # Too far from left wall: steer toward it
+                cmd.linear.x = 0.15
+                cmd.angular.z = 0.30
+
+            self.pub.publish(cmd)
+            self.rate.sleep()
+
+    def callback(self, data):
+        min_dist = float('inf')
+
+        # Only look at the LEFT side of the LiDAR
+        # 1.52 to 1.62 radians = roughly 87-93 degrees
+        left_start = int((1.52 - data.angle_min) / data.angle_increment)
+        left_end = int((1.62 - data.angle_min) / data.angle_increment)
+
+        for i in range(left_start, left_end):
+            r = data.ranges[i]
+            if r == float('inf') or r == 0.0:
+                continue
+
+            # Convert polar (r, angle) to cartesian (x, y)
+            theta = i * data.angle_increment + data.angle_min
+            x = r * np.cos(theta)
+            y = r * np.sin(theta)
+
+            # Build a point in the base_scan frame
+            point = PointStamped()
+            point.header.frame_id = 'base_scan'
+            point.header.stamp = rospy.Time(0)
+            point.point.x = x
+            point.point.y = y
+            point.point.z = 0.0
+
+            # Transform into left_limit frame
+            try:
+                transformed = tf2_geometry_msgs.do_transform_point(
+                    point, self.transform
+                )
+                # Euclidean distance from left_limit origin
+                dist = np.sqrt(
+                    transformed.point.x**2 +
+                    transformed.point.y**2
+                )
+                if dist < min_dist:
+                    min_dist = dist
+            except:
+                continue
+
+        # Check if something is directly in front
+        if data.ranges[0] < 0.30:
+            self.front_blocked = True
+        else:
+            self.front_blocked = False
+
+        # Update state based on left wall distance
+        if min_dist < 0.10:
+            self.state = 'right'  
+        elif min_dist > 0.20:
+            self.state = 'left'    
+        else:
+            self.state = 'forward' 
+
+        rospy.loginfo('state=%s | front=%s | dist=%.3f',
+                      self.state, self.front_blocked, min_dist)
+
+
+def main(args):
+    rospy.init_node('left_wall_following', anonymous=True)
+    ic = turtlebot_behavior()
+    try:
+        rospy.spin()
+    except KeyboardInterrupt:
+        print('Shutting down')
+
+
+if __name__ == '__main__':
+    main(sys.argv)
