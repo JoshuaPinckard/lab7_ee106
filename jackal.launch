@@ -1,0 +1,7 @@
+<launch>
+ 
+  <node pkg="tf2_ros" type="static_transform_publisher" name="left_limit_tf"
+        args="0 0.15 0 0 0 0 base_link left_limit" />
+
+
+</launch>
